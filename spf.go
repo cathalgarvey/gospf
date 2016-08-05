@@ -57,6 +57,9 @@ func (sc *spfChecker) LookupSPFRecords(domain string) ([]string, error) {
 	if !ok {
 		txtRecords, err := net.LookupTXT(domain)
 		if err != nil {
+			if dnserr, ok := err.(*net.DNSError); ok && (!dnserr.Timeout()) {
+				return nil, ErrNoSPFRecords
+			}
 			return nil, err
 		}
 		if txtRecords == nil || len(txtRecords) == 0 {
@@ -74,12 +77,14 @@ func (sc *spfChecker) LookupSPFRecords(domain string) ([]string, error) {
 	return sc.Cache[domain], nil
 }
 
-// Validate returns whether an IP is allowed to post from a given domain
+// Validate returns whether an IP is allowed to post from a given domain.
+// If no SPF records are found and it's believed not to be a DNS timeout,
+// the default is True.
 func (sc *spfChecker) Validate(ip, domain string) (bool, error) {
 	spfRecordList, err := sc.LookupSPFRecords(domain)
 	if err != nil {
 		if err == ErrNoSPFRecords {
-			return false, nil
+			return true, nil
 		}
 		return false, err
 	}
