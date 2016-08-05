@@ -3,6 +3,7 @@ package spf
 import (
 	"errors"
 	"net"
+	"net/mail"
 	"strings"
 )
 
@@ -18,8 +19,18 @@ func init() {
 }
 
 // Validate returns whether emails from a domain can be sent from a given IP.
+// This is the intended main entry point to this library.
+// If you have an email address, then use GetDomainFromEmail to get the domain.
+// Results from Validate are simply cached in RAM; extended and heavy use may
+// create a memory leak. If this is a problem, simply call the top-level
+// DumpCache function.
 func Validate(ip, domain string) (bool, error) {
 	return looker.Validate(ip, domain)
+}
+
+// DumpCache dumps the cache from the built-in SPF Checker.
+func DumpCache() {
+	looker.DumpCache()
 }
 
 // spfChecker is a cached TXT looker-upper and SPF checker
@@ -33,6 +44,11 @@ func NewSPFChecker() *spfChecker {
 	s := new(spfChecker)
 	s.Cache = make(map[string][]string)
 	return s
+}
+
+// DumpCache resets the SPF cache to an empty map.
+func (sc *spfChecker) DumpCache() {
+	sc.Cache = make(map[string][]string)
 }
 
 // LookupSPFRecords is a cached lookup for SPF records
@@ -101,9 +117,14 @@ func (sc *spfChecker) Validate(ip, domain string) (bool, error) {
 	return false, nil
 }
 
-// GetDomainFromEmail returns the domain name from an email address
+// GetDomainFromEmail returns the domain name from an email address. It is
+// somewhat naive at present.
 func GetDomainFromEmail(email string) (string, error) {
-	return processEmail(strings.ToLower(strings.TrimSpace(email)))
+	parsed, err := mail.ParseAddress(email)
+	if err != nil {
+		return "", err
+	}
+	return processEmail(strings.ToLower(strings.TrimSpace(parsed.Address)))
 }
 
 // == Everything Under Here Unmodified from Original ==
