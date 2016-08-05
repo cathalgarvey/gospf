@@ -2,102 +2,111 @@ package spf
 
 import (
 	"errors"
-	"fmt"
-	"log"
 	"net"
 	"strings"
 )
-// SPF wraps all of our information into a nice little struct
-type SPF struct {
-	ValidIPRanges []string //Contains a list of valid CIDR ranges, as defined in the SPF record
-	Domain        string   //The domain we're checking SPF for
-	EmailAddress  string   //The email address we're pretending to send as
-	IPAddress     string   //The IP address we're pretending to send from
-	IsValid       bool     //Will be true if IPAddress is found in ValidIPRanges
-	FoundCIDR     string   //The actual CIDR range our IP is found in
-	allRecord     string
+
+var (
+	// ErrNoSPFRecords when no TXT/SPF records are found or parsed.
+	ErrNoSPFRecords = errors.New("No SPF Records found.")
+
+	looker *spfChecker
+)
+
+func init() {
+	looker = NewSPFChecker()
 }
 
-// New returns an SPF struct, given an email address and a source IP.
-func New(emailAddress string, sourceIPAddress string) *SPF {
-	spfObject := SPF{
-		EmailAddress: emailAddress,
-		IPAddress:    sourceIPAddress,
-	}
-	spfObject.Process()
-	return &spfObject
+// Validate returns whether emails from a domain can be sent from a given IP.
+func Validate(ip, domain string) (bool, error) {
+	return looker.Validate(ip, domain)
 }
 
-// Process is where all the magic happens. It is called when we create a new SPF object.
-// It can also be called again if you change the email address or source IP address.
-func (spf *SPF) Process() {
-	if spf.EmailAddress == "" {
-		log.Fatal("Email Address is not defined")
-	}
-	if spf.IPAddress == "" {
-		log.Fatal("Source IP Address is not defined")
-	}
-	var err error
-	spf.Domain, err = processEmail(spf.EmailAddress)
-	if err != nil {
-		log.Fatal(err)
-	}
+// spfChecker is a cached TXT looker-upper and SPF checker
+type spfChecker struct {
+	Cache map[string][]string
+}
 
-	txtRecords, err := net.LookupTXT(spf.Domain)
-	if err != nil {
-		log.Fatal(err)
-	}
+// NewSPFChecker returns a SPF looker-upper with an internal cache.
+// You should probably use the library's instance through the top-level functions.
+func NewSPFChecker() *spfChecker {
+	s := new(spfChecker)
+	s.Cache = make(map[string][]string)
+	return s
+}
 
-	spfRecordList, err := findSPFRecord(txtRecords)
-	if err != nil {
-		log.Fatal(err)
+// LookupSPFRecords is a cached lookup for SPF records
+func (sc *spfChecker) LookupSPFRecords(domain string) ([]string, error) {
+	_, ok := sc.Cache[domain]
+	if !ok {
+		txtRecords, err := net.LookupTXT(domain)
+		if err != nil {
+			return nil, err
+		}
+		if txtRecords == nil || len(txtRecords) == 0 {
+			return nil, ErrNoSPFRecords
+		}
+		spfRs, err := findSPFRecord(txtRecords)
+		if err != nil {
+			return nil, err
+		}
+		if spfRs == nil || len(spfRs) == 0 {
+			return nil, ErrNoSPFRecords
+		}
+		sc.Cache[domain] = spfRs
 	}
+	return sc.Cache[domain], nil
+}
 
+// Validate returns whether an IP is allowed to post from a given domain
+func (sc *spfChecker) Validate(ip, domain string) (bool, error) {
+	spfRecordList, err := sc.LookupSPFRecords(domain)
+	if err != nil {
+		if err == ErrNoSPFRecords {
+			return false, nil
+		}
+		return false, err
+	}
 	spfRecord := spfRecordList[0]
 	splitSPFRecord := strings.Split(spfRecord, " ")
 	allRecord := splitSPFRecord[len(splitSPFRecord)-1]
 	allRecordSplit := strings.Split(allRecord, "a")
 	allRecord = allRecordSplit[0]
-	spf.allRecord = allRecord
 
-	ips, err := getIPsForRecord(spf.Domain, spfRecord)
+	ips, err := getIPsForRecord(domain, spfRecord)
 	if err != nil {
-		log.Fatal(err)
+		return false, err
 	}
-	spf.ValidIPRanges = ips
 
+  // TODO Does this need IPv6 modernisation? Not clear what's happening with the
+	// mask suffixing.
 	for _, element := range ips {
 		elementWithCidr := element
 		if !strings.Contains(elementWithCidr, "/") {
 			if !strings.Contains(elementWithCidr, ":") {
-				elementWithCidr = fmt.Sprintf("%s/32", elementWithCidr)
+				elementWithCidr = elementWithCidr + "/32" // fmt.Sprintf("%s/32", elementWithCidr)
 			} else {
-				elementWithCidr = fmt.Sprintf("%s/128", elementWithCidr)
+				elementWithCidr = elementWithCidr + "/128" // fmt.Sprintf("%s/128", elementWithCidr)
 			}
 		}
 		_, cidrnet, err := net.ParseCIDR(elementWithCidr)
 		if err != nil {
-			log.Fatal(err)
+			return false, err
 		}
-		ipAddress := net.ParseIP(spf.IPAddress)
+		ipAddress := net.ParseIP(ip)
 		if cidrnet.Contains(ipAddress) {
-			spf.IsValid = true
-			spf.FoundCIDR = cidrnet.String()
+			return true, nil
 		}
 	}
+	return false, nil
 }
 
-// AllRecord returns a string containing "SoftFail", "Fail", or "None".
-func (spf *SPF) AllRecord() string {
-	allRecord := spf.allRecord
-	if allRecord == "~" {
-		return "SoftFail"
-	} else if allRecord == "-" {
-		return "Fail"
-	} else {
-		return "None"
-	}
+// GetDomainFromEmail returns the domain name from an email address
+func GetDomainFromEmail(email string) (string, error) {
+	return processEmail(strings.ToLower(strings.TrimSpace(email)))
 }
+
+// == Everything Under Here Unmodified from Original ==
 
 //Splits an email address into "username" and "domain" parts. It gives back the domain name.
 func processEmail(email string) (string, error) {
